@@ -356,7 +356,7 @@ examples **synthetic or sanitized**.
 
 ## 15. Confidential Reporting
 
-For sensitive security or privacy reports, write to kontakt@ermias.ai (the contact in §1). Once the public repository has GitHub's private vulnerability reporting enabled, you can use it too (Security tab, "Report a vulnerability"). Do not use public
+For sensitive security or privacy reports, write to kontakt@ermias.ai (the contact in §1). You can also use GitHub's private vulnerability reporting on the repository (Security tab, "Report a vulnerability"). Do not use public
 GitHub Issues for sensitive reports. See [SECURITY.md](SECURITY.md) for what to include.
 
 ## 16. Limits of Detection

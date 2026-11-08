@@ -229,10 +229,10 @@ Trader status (Chrome, EU): a free, non-commercial extension may be declared as 
 | Field | URL |
 |---|---|
 | Homepage URL | `https://ermias.ai/promptskjold` |
-| Support URL | `https://github.com/segiITU/PromptSkjold/issues`, or `mailto:kontakt@ermias.ai` (update when the clean repo exists) |
+| Support URL | `https://github.com/segiITU/PromptSkjold/issues` (public; for anything private use `kontakt@ermias.ai`) |
 | Privacy policy URL | `https://ermias.ai/promptskjold/privacy` |
 | Terms | `https://ermias.ai/promptskjold/terms` |
-| Source code | the public PromptSkjold repo (not yet created) |
+| Source code | `https://github.com/segiITU/PromptSkjold` |
 | Contact / security | `kontakt@ermias.ai` |
 
 ## Screenshots And Promo Tiles
@@ -259,4 +259,4 @@ Do not use DFKI logos in any store asset: the DFKI name and logo are not license
 - [ ] Screenshots are synthetic only.
 - [ ] Trader or non-trader status declared.
 - [ ] Contact e-mail `kontakt@ermias.ai` is verified in the dashboard.
-- [ ] After the clean repo exists: update `project-links.ts`, the support URL here and the README links.
+- [x] Repo links point to `https://github.com/segiITU/PromptSkjold`.
