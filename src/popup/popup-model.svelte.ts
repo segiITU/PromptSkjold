@@ -1,0 +1,573 @@
+import { derived, writable, get, type Readable, type Writable } from 'svelte/store';
+import type {
+  ComposerMatchState,
+  DetectionOptions,
+  DetectPiiRequest,
+  GetPageProtectionStateRequest,
+  PageProtectionStateResponse,
+  GetNerStatusRequest,
+  GetSystemCompatibilityStatusRequest,
+  GroupName,
+  Message,
+  NerModelKey,
+  NerStatus,
+  NerStatusChangedBroadcast,
+  NerStatusResponse,
+  PiiResultResponse,
+  PiiSpan,
+  ReplacementModeSetting,
+  Settings,
+  SettingsUpdatedMessage,
+  SystemCompatibilityStatus,
+  SystemCompatibilityStatusResponse,
+} from '../shared/message-types';
+import {
+  ACTIVE_NER_MODELS,
+  nerModelChoices,
+  nerModelChoiceValue,
+  parseNerModelChoice,
+  runtimeNerModelKey,
+  type NerModelChoice,
+  isCpuFallback,
+} from '../shared/constants';
+import { GROUP_NAMES, GROUP_DEFAULT_ON, filterByGroup } from '../shared/category-groups';
+import { applyAllowlistToText } from '../shared/feedback';
+import { loadIdentityVault } from '../shared/identity-vault';
+import { shouldAutoWarmLocalAi } from '../shared/local-ai-warmup-gate';
+import { deriveResourceSummary, type ResourceSummary } from '../shared/popup-resource-summary';
+import { packagedTermsUrl, PUBLIC_PROJECT_LINKS } from '../shared/project-links';
+import { minResolvedThreshold, resolveThreshold } from '../shared/sensitivity-resolver';
+import { SYSTEM_CHECK_STORAGE_KEY } from '../shared/system-check-storage';
+import { t } from '../shared/i18n/core';
+import type { MessageKey } from '../shared/i18n/da';
+import { clearEntityMaps, clearFeedback as clearFeedbackLog, getFeedbackLog, loadSettings, saveSettings } from '../shared/storage';
+
+export type TabId = 'protect' | 'detect' | 'test' | 'settings';
+export type TabDefinition = { id: TabId; labelKey: MessageKey };
+export type DetectionCategoryId = GroupName;
+export type DetectionCategory = {
+  id: GroupName;
+  label: string;
+  description: string;
+  enabled: boolean;
+  defaultEnabled: boolean;
+};
+export type FeedbackCounts = { confirmed: number; ignored: number; pending: number };
+export type StatusTone = 'ok' | 'danger' | 'muted';
+export type TestOutcome =
+  | { state: 'idle' }
+  | { state: 'running' }
+  | { state: 'error'; message: string }
+  | { state: 'done'; /** the text that was checked (offsets in `spans` refer to it) */ text: string; spans: PiiSpan[]; totalMs?: number; nerMs?: number; nerLine: string };
+export type StatusPill = { label: string; tone: StatusTone; title?: string };
+
+export type NavigationModel = { activeTab: Writable<TabId>; setActiveTab: (tab: TabId) => void };
+export type ProtectionModel = {
+  enabled: Writable<boolean>;
+  wasmStatus: Writable<StatusPill>;
+  nerStatus: Writable<StatusPill>;
+  cpuFallback: Writable<boolean>;
+  version: Writable<string>;
+  modelLabel: Writable<string>;
+  systemCompatibility: Writable<SystemCompatibilityStatus | null>;
+  resourceSummary: Readable<ResourceSummary | null>;
+  /** How the active supported page last found its message box, if it has. */
+  composerMatch: Writable<ComposerMatchState | null>;
+  toggle: () => void;
+  setEnabled: (enabled: boolean) => Promise<void>;
+  retryLocalAi: () => Promise<void>;
+  retrying: Writable<boolean>;
+};
+export type CategoriesModel = {
+  categories: Writable<DetectionCategory[]>;
+  enabledCount: Readable<number>;
+  sensitivityMode: Writable<Settings['sensitivityMode']>;
+  toggleCategory: (categoryId: GroupName) => void;
+  setCategoryEnabled: (categoryId: GroupName, enabled: boolean) => Promise<void>;
+  restoreDefaults: () => Promise<void>;
+};
+export type VaultModel = {
+  memoryEnabled: Writable<boolean>;
+  consistentReplacementMode: Writable<boolean>;
+  mappingCount: Writable<number>;
+  clearMappings: () => Promise<void>;
+  openVaultOptions: () => void;
+  setMemoryEnabled: (enabled: boolean) => Promise<void>;
+  setReplacementMode: (mode: ReplacementModeSetting) => Promise<void>;
+};
+export type TestModel = {
+  testInput: Writable<string>;
+  isRunning: Writable<boolean>;
+  outcome: Writable<TestOutcome>;
+  runCount: Writable<number>;
+  feedbackCounts: Writable<FeedbackCounts>;
+  runDetection: () => Promise<void>;
+  clearFeedback: () => Promise<void>;
+};
+export type SettingsModel = {
+  minConfidence: Writable<number>;
+  debug: Writable<boolean>;
+  clipboardInterceptEnabled: Writable<boolean>;
+  nerModel: Writable<NerModelKey>;
+  nerModelChoice: Writable<string>;
+  nerModelChoices: readonly NerModelChoice[];
+  openOptions: () => void;
+  openIssueReport: () => void;
+  openSecurityReport: () => void;
+  openPrivacySupport: () => void;
+  openPrivacyPolicy: () => void;
+  openTermsOfUse: () => void;
+  openImpressum: () => void;
+  setMinConfidence: (value: number) => Promise<void>;
+  setDebug: (enabled: boolean) => Promise<void>;
+  setClipboardInterceptEnabled: (enabled: boolean) => Promise<void>;
+  setNerModelChoice: (value: string) => Promise<void>;
+};
+export type AppModels = {
+  navigation: NavigationModel;
+  protection: ProtectionModel;
+  categories: CategoriesModel;
+  vault: VaultModel;
+  test: TestModel;
+  settings: SettingsModel;
+};
+
+export const tabs: TabDefinition[] = [
+  { id: 'protect', labelKey: 'tab.protect' },
+  { id: 'detect', labelKey: 'tab.detect' },
+  { id: 'test', labelKey: 'tab.test' },
+  { id: 'settings', labelKey: 'tab.settings' },
+];
+
+
+function categoriesFromSettings(settings: Settings): DetectionCategory[] {
+  return GROUP_NAMES.map((group) => ({
+    id: group,
+    label: t(`group.${group}` as MessageKey),
+    description: t(`group.desc.${group}` as MessageKey),
+    enabled: settings.groupsEnabled[group],
+    defaultEnabled: GROUP_DEFAULT_ON[group],
+  }));
+}
+
+async function broadcastSettings(settings: Settings): Promise<void> {
+  const message: SettingsUpdatedMessage = { type: 'SETTINGS_UPDATED', payload: settings };
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map((tab) => tab.id ? chrome.tabs.sendMessage(tab.id, message).catch(() => undefined) : undefined));
+}
+
+function modelLabelFor(key: NerModelKey): string {
+  return ACTIVE_NER_MODELS.find((model) => model.key === key)?.label ?? key;
+}
+
+function status(label: string, tone: StatusTone, title?: string): StatusPill {
+  return { label, tone, title };
+}
+
+function currentDetectionConfig(settings: Settings | null, nerModel: Writable<NerModelKey>): DetectionOptions {
+  const provider = settings?.nerProvider ?? 'transformers';
+  return { ner_provider: provider, ner_model: runtimeNerModelKey(get(nerModel)) };
+}
+
+function openExternalUrl(url: string): void {
+  void chrome.tabs.create({ url });
+}
+
+export function createAppModels(): AppModels {
+  let currentSettings: Settings | null = null;
+  let lastNerStatus: NerStatus | null = null;
+
+  const activeTab = writable<TabId>('protect');
+  const enabled = writable(true);
+  const wasmStatus = writable<StatusPill>(status(t('st.loading'), 'muted'));
+  const nerStatus = writable<StatusPill>(status(t('st.loading'), 'muted'));
+  const cpuFallback = writable(false);
+  const version = writable(typeof chrome !== 'undefined' ? chrome.runtime.getManifest().version : '');
+  const modelLabel = writable('');
+  const systemCompatibility = writable<SystemCompatibilityStatus | null>(null);
+  const composerMatch = writable<ComposerMatchState | null>(null);
+  const retrying = writable(false);
+  const nerStatusRaw = writable<NerStatus | null>(null);
+  const settingsStore = writable<Settings | null>(null);
+  const resourceSummary: Readable<ResourceSummary | null> = derived(
+    [settingsStore, systemCompatibility, nerStatusRaw],
+    ([$settings, $status, $ner]) => deriveResourceSummary($settings, $status, $ner),
+  );
+
+  const categories = writable<DetectionCategory[]>([]);
+  const enabledCount = derived(categories, ($categories) => $categories.filter((category) => category.enabled).length);
+  const sensitivityMode = writable<Settings['sensitivityMode']>('global');
+
+  const memoryEnabled = writable(true);
+  const consistentReplacementMode = writable(true);
+  const mappingCount = writable(0);
+
+  const testInput = writable(t('test.sample'));
+  const isRunning = writable(false);
+  const outcome = writable<TestOutcome>({ state: 'idle' });
+  const runCount = writable(0);
+  const feedbackCounts = writable<FeedbackCounts>({ confirmed: 0, ignored: 0, pending: 0 });
+
+  const minConfidence = writable(0.5);
+  const debug = writable(false);
+  const clipboardInterceptEnabled = writable(true);
+  const nerModel = writable<NerModelKey>('bardsai-mini');
+  const nerModelChoice = writable<string>(nerModelChoiceValue('bardsai-mini', undefined));
+
+  function applySettings(settings: Settings): void {
+    currentSettings = settings;
+    settingsStore.set(settings);
+    enabled.set(settings.enabled);
+    categories.set(categoriesFromSettings(settings));
+    sensitivityMode.set(settings.sensitivityMode);
+    memoryEnabled.set(settings.identityVaultEnabled);
+    consistentReplacementMode.set(settings.defaultReplacementMode === 'placeholder');
+    minConfidence.set(settings.minConfidence);
+    debug.set(settings.debug);
+    clipboardInterceptEnabled.set(settings.clipboardInterceptEnabled);
+    const normalizedModel = runtimeNerModelKey(settings.nerModel);
+    nerModel.set(normalizedModel);
+    nerModelChoice.set(nerModelChoiceValue(normalizedModel, settings.nerWebGpuDtype));
+    modelLabel.set(modelLabelFor(normalizedModel));
+  }
+
+  async function refreshStats(): Promise<void> {
+    const [feedback, vault] = await Promise.all([getFeedbackLog(), loadIdentityVault()]);
+    feedbackCounts.set({ confirmed: feedback.length, ignored: currentSettings?.allowlist.length ?? 0, pending: 0 });
+    mappingCount.set(vault.records.length);
+  }
+
+  async function saveAndBroadcast(partial: Partial<Settings>): Promise<void> {
+    await saveSettings(partial);
+    const updated = await loadSettings();
+    applySettings(updated);
+    await broadcastSettings(updated);
+    await refreshStats();
+  }
+
+  async function probeWasm(): Promise<void> {
+    try {
+      const response: PiiResultResponse = await chrome.runtime.sendMessage({
+        type: 'DETECT_PII',
+        payload: { text: 'test', requestId: 'init_check', config: { ner_provider: 'off', ner_enabled: false } },
+      } as DetectPiiRequest);
+      wasmStatus.set(response?.type === 'PII_RESULT' ? status(t('st.loaded'), 'ok') : status(t('st.notLoaded'), 'danger'));
+    } catch {
+      wasmStatus.set(status(t('st.notLoaded'), 'danger'));
+    }
+  }
+
+  async function fetchNerStatus(config?: DetectionOptions): Promise<NerStatus | null> {
+    try {
+      const request: GetNerStatusRequest = { type: 'GET_NER_STATUS', payload: { config } };
+      const response: NerStatusResponse = await chrome.runtime.sendMessage(request);
+      return response?.type === 'NER_STATUS' ? response.payload : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function renderNerStatus(statusValue: NerStatus): void {
+    lastNerStatus = statusValue;
+    nerStatusRaw.set(statusValue);
+    cpuFallback.set(statusValue.mode === 'transformers' && statusValue.state === 'ready' && isCpuFallback(statusValue));
+    if (statusValue.modelLabel) modelLabel.set(statusValue.modelLabel);
+    const readyLabel = statusValue.modelLabel ? t('st.readyModel', { model: shortModelLabel(statusValue.modelLabel) }) : t('st.ready');
+    const title = statusValue.message ? (statusValue.modelLabel ? `${statusValue.modelLabel}: ${statusValue.message}` : statusValue.message) : undefined;
+    switch (statusValue.state) {
+      case 'ready': nerStatus.set(status(readyLabel, 'ok', title)); break;
+      case 'idle': nerStatus.set(status(t('st.notLoaded'), 'muted', title)); break;
+      case 'loading': nerStatus.set(status(t('st.loading'), 'muted', title)); break;
+      case 'failed': nerStatus.set(status(t('st.failed'), 'danger', title)); break;
+      case 'unavailable': nerStatus.set(status(t('st.unavailable'), 'muted', title)); break;
+    }
+  }
+
+  async function refreshNerStatus(config = currentDetectionConfig(currentSettings, nerModel)): Promise<void> {
+    cpuFallback.set(false);
+    nerStatus.set(status(t('st.loading'), 'muted'));
+    const statusValue = await fetchNerStatus(config);
+    if (statusValue) renderNerStatus(statusValue);
+    // If fetch failed (e.g., offscreen listener wasn't ready yet), leave the
+    // "Loading..." pill in place. The offscreen will push NER_STATUS_CHANGED
+    // once it transitions, so we don't need to synthesise a "Failed" label.
+  }
+
+  async function warmUpNer(config = currentDetectionConfig(currentSettings, nerModel)): Promise<void> {
+    if (config.ner_provider === 'off') return;
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'DETECT_PII',
+        payload: { text: 'warmup', requestId: `popup_warmup_${Date.now()}`, config },
+      } as DetectPiiRequest);
+    } catch {
+      // refreshNerStatus will show cached failure/unavailable state where possible.
+    }
+  }
+
+  async function fetchSystemCompatibility(): Promise<SystemCompatibilityStatus | null> {
+    try {
+      const request: GetSystemCompatibilityStatusRequest = { type: 'GET_SYSTEM_COMPATIBILITY_STATUS' };
+      const response: SystemCompatibilityStatusResponse = await chrome.runtime.sendMessage(request);
+      return response?.type === 'SYSTEM_COMPATIBILITY_STATUS' ? response.payload : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Ask the page in front of the user how it is attaching to the site.
+   *
+   * Only the content script knows, and only from the moment a paste asks it.
+   * A tab with no content script — an unsupported site, a page loaded before
+   * the extension — simply does not answer, which is the same as having
+   * nothing to report.
+   */
+  async function fetchPageProtectionState(): Promise<ComposerMatchState | null> {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (typeof tab?.id !== 'number') return null;
+      const request: GetPageProtectionStateRequest = { type: 'GET_PAGE_PROTECTION_STATE' };
+      const response: PageProtectionStateResponse = await chrome.tabs.sendMessage(tab.id, request);
+      return response?.type === 'PAGE_PROTECTION_STATE' ? response.payload.composerMatch : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function applyLocalAiOffStatus(): void {
+    lastNerStatus = null;
+    nerStatusRaw.set(null);
+    cpuFallback.set(false);
+    nerStatus.set(status(t('st.off'), 'muted', t('res.aiOff.detail')));
+  }
+
+  async function init(): Promise<void> {
+    const settings = await loadSettings();
+    applySettings(settings);
+    await refreshStats();
+    void probeWasm();
+
+    const systemStatus = await fetchSystemCompatibility();
+    systemCompatibility.set(systemStatus);
+    composerMatch.set(await fetchPageProtectionState());
+
+    const config = currentDetectionConfig(currentSettings, nerModel);
+    if (config.ner_provider === 'off') {
+      applyLocalAiOffStatus();
+      return;
+    }
+
+    if (!shouldAutoWarmLocalAi(currentSettings, systemStatus, lastNerStatus)) {
+      // Resource-unsafe state (warning/critical-override/unknown/known
+      // CPU/WASM fallback). Read cached runtime status without warming.
+      await refreshNerStatus(config);
+      return;
+    }
+
+    const warmup = warmUpNer(config);
+    await refreshNerStatus(config);
+    await warmup.catch(() => undefined);
+    await refreshNerStatus(config);
+  }
+
+  /** Mirrors the options page's retry: switch Local AI back on, then warm it. */
+  async function retryLocalAi(): Promise<void> {
+    if (get(retrying)) return;
+    retrying.set(true);
+    nerStatus.set(status(t('st.loading'), 'muted'));
+    try {
+      const enabledResponse: SystemCompatibilityStatusResponse = await chrome.runtime.sendMessage({
+        type: 'SET_LOCAL_AI_DETECTION',
+        payload: { enabled: true },
+      });
+      if (enabledResponse?.type === 'SYSTEM_COMPATIBILITY_STATUS') systemCompatibility.set(enabledResponse.payload);
+      const updated = await loadSettings();
+      applySettings(updated);
+      await broadcastSettings(updated);
+
+      const modelKey = runtimeNerModelKey(updated.nerModel);
+      await chrome.runtime.sendMessage({
+        type: 'WARM_UP_LOCAL_AI',
+        payload: { config: { ner_provider: 'transformers', ner_model: modelKey } },
+      });
+    } catch {
+      // The background records the failure; the refreshes below show it.
+    } finally {
+      const settings = await loadSettings();
+      applySettings(settings);
+      systemCompatibility.set(await fetchSystemCompatibility());
+      if (settings.nerProvider === 'off') applyLocalAiOffStatus();
+      else await refreshNerStatus(currentDetectionConfig(settings, nerModel));
+      retrying.set(false);
+    }
+  }
+
+  function updateCategoryLocal(categoryId: GroupName, value: boolean): Record<GroupName, boolean> {
+    const base = currentSettings?.groupsEnabled ?? Object.fromEntries(GROUP_NAMES.map((group) => [group, GROUP_DEFAULT_ON[group]])) as Record<GroupName, boolean>;
+    return { ...base, [categoryId]: value };
+  }
+
+  async function setCategoryEnabled(categoryId: GroupName, value: boolean): Promise<void> {
+    await saveAndBroadcast({ groupsEnabled: updateCategoryLocal(categoryId, value) });
+  }
+
+  async function runDetection(): Promise<void> {
+    const text = get(testInput).trim();
+    if (!text || isRunning && get(isRunning)) return;
+    isRunning.set(true);
+    outcome.set({ state: 'running' });
+    nerStatus.set(status(t('st.loading'), 'muted'));
+    cpuFallback.set(false);
+    try {
+      const settings = await loadSettings();
+      applySettings(settings);
+      const request: DetectPiiRequest = {
+        type: 'DETECT_PII',
+        payload: {
+          text,
+          requestId: `popup_${Date.now()}`,
+          config: { ...currentDetectionConfig(settings, nerModel), min_confidence: minResolvedThreshold(settings) },
+        },
+      };
+      const response: PiiResultResponse = await chrome.runtime.sendMessage(request);
+      if (response?.type !== 'PII_RESULT') {
+        outcome.set({ state: 'error', message: t('test.invalid') });
+        return;
+      }
+      let spans = filterByGroup(response.payload.spans, settings.groupsEnabled);
+      spans = applyAllowlistToText(text, spans, settings.allowlist);
+      spans = spans.filter((span) => span.score >= resolveThreshold(settings, span.entity_type));
+      const ner = await fetchNerStatus(currentDetectionConfig(settings, nerModel));
+      if (ner) renderNerStatus(ner);
+      outcome.set({
+        state: 'done',
+        text,
+        spans,
+        totalMs: response.payload.timings?.totalMs,
+        nerMs: response.payload.timings?.nerMs,
+        nerLine: ner ? formatNerStatusLine(ner) : '',
+      });
+      runCount.update((count) => count + 1);
+    } catch (error) {
+      outcome.set({ state: 'error', message: t('test.error', { msg: String(error) }) });
+    } finally {
+      isRunning.set(false);
+      await refreshStats();
+    }
+  }
+
+  const app: AppModels = {
+    navigation: { activeTab, setActiveTab: activeTab.set },
+    protection: {
+      enabled,
+      wasmStatus,
+      nerStatus,
+      cpuFallback,
+      version,
+      modelLabel,
+      systemCompatibility,
+      resourceSummary,
+      composerMatch,
+      toggle: () => void saveAndBroadcast({ enabled: !get(enabled) }),
+      setEnabled: (value) => saveAndBroadcast({ enabled: value }),
+      retryLocalAi,
+      retrying,
+    },
+    categories: {
+      categories,
+      enabledCount,
+      sensitivityMode,
+      toggleCategory: (categoryId) => void setCategoryEnabled(categoryId, !(get(categories).find((category) => category.id === categoryId)?.enabled ?? false)),
+      setCategoryEnabled,
+      restoreDefaults: () => saveAndBroadcast({ groupsEnabled: { ...GROUP_DEFAULT_ON } }),
+    },
+    vault: {
+      memoryEnabled,
+      consistentReplacementMode,
+      mappingCount,
+      clearMappings: async () => { await clearEntityMaps(); await refreshStats(); },
+      openVaultOptions: () => chrome.tabs.create({ url: `${chrome.runtime.getURL('options/options.html')}#vault-section` }),
+      setMemoryEnabled: (value) => saveAndBroadcast({ identityVaultEnabled: value }),
+      setReplacementMode: (mode) => saveAndBroadcast({ defaultReplacementMode: mode }),
+    },
+    test: {
+      testInput,
+      isRunning,
+      outcome,
+      runCount,
+      feedbackCounts,
+      runDetection,
+      clearFeedback: async () => { await clearFeedbackLog(); await refreshStats(); },
+    },
+    settings: {
+      minConfidence,
+      debug,
+      clipboardInterceptEnabled,
+      nerModel,
+      nerModelChoice,
+      nerModelChoices: nerModelChoices(),
+      openOptions: () => chrome.runtime.openOptionsPage(),
+      openIssueReport: () => openExternalUrl(PUBLIC_PROJECT_LINKS.newIssue),
+      openSecurityReport: () => openExternalUrl(PUBLIC_PROJECT_LINKS.security),
+      openPrivacySupport: () => openExternalUrl(PUBLIC_PROJECT_LINKS.support),
+      openPrivacyPolicy: () => openExternalUrl(PUBLIC_PROJECT_LINKS.privacy),
+      openTermsOfUse: () => openExternalUrl(packagedTermsUrl()),
+      openImpressum: () => openExternalUrl(PUBLIC_PROJECT_LINKS.impressum),
+      setMinConfidence: (value) => saveAndBroadcast({ minConfidence: value }),
+      setDebug: async (value) => { await saveSettings({ debug: value }); debug.set(value); },
+      setClipboardInterceptEnabled: (value) => saveAndBroadcast({ clipboardInterceptEnabled: value }),
+      setNerModelChoice: async (value) => {
+        const parsed = parseNerModelChoice(value);
+        const patch: Partial<Settings> = { nerModel: runtimeNerModelKey(parsed.nerModel) };
+        if (parsed.nerWebGpuDtype) patch.nerWebGpuDtype = parsed.nerWebGpuDtype;
+        await saveAndBroadcast(patch);
+        const config = currentDetectionConfig(currentSettings, nerModel);
+        nerStatus.set(status('Loading...', 'muted'));
+        cpuFallback.set(false);
+        await warmUpNer(config).catch(() => undefined);
+        await refreshNerStatus(config);
+      },
+    },
+  };
+
+  if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((message: Message) => {
+      if (message?.type === 'NER_STATUS_CHANGED') {
+        renderNerStatus((message as NerStatusChangedBroadcast).payload);
+      }
+      return false;
+    });
+  }
+
+  if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      if (changes['pg_settings']?.newValue) {
+        applySettings(changes['pg_settings'].newValue as Settings);
+        void refreshStats();
+      }
+      if (changes['pg_identity_vault']) void refreshStats();
+      if (changes[SYSTEM_CHECK_STORAGE_KEY]) {
+        const next = changes[SYSTEM_CHECK_STORAGE_KEY].newValue as SystemCompatibilityStatus | undefined;
+        systemCompatibility.set(next ?? null);
+      }
+    });
+  }
+
+  void init();
+  return app;
+}
+
+function formatNerStatusLine(statusValue: NerStatus): string {
+  const model = statusValue.modelLabel ? `${statusValue.modelLabel}: ` : '';
+  const label = t(`nerline.${statusValue.state}` as MessageKey);
+  return statusValue.message ? `${model}${label}: ${statusValue.message}` : `${model}${label}`;
+}
+function shortModelLabel(label: string): string {
+  if (label.startsWith('AI4Privacy')) return 'AI4Privacy';
+  if (label.startsWith('BardsAI')) return 'BardsAI';
+  if (label.startsWith('HikmaAI')) return 'HikmaAI';
+  if (label.startsWith('da-pii-mini')) return 'da-pii-mini';
+  return label;
+}

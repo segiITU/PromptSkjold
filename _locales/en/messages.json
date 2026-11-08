@@ -1,0 +1,4 @@
+{
+  "extName": { "message": "PromptSkjold" },
+  "extDescription": { "message": "Review and replace personal information in text before you send it to AI chats. Runs locally in your browser. An aid, not a guarantee." }
+}

@@ -1,0 +1,69 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+generated/
+.model-sources/
+tmp/
+
+# Packaged extension archives (see npm run package:release)
+prompt-skjold-*.zip
+release/*.zip
+release/*.sha256
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Rust and WebAssembly artifacts (build with npm run build:wasm)
+crate/target/
+crate/pkg/
+*.wasm
+*.pdb
+**/*.rs.bk
+
+# Test and tool output
+.eslintcache
+*.actual
+TEST-results.xml
+test-args.txt
+*.log
+tests-local/
+.artifacts/live-e2e/
+test-results/
+playwright-report/
+benchmarks/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.crx
+*.key
+
+# Editor and OS files
+.DS_Store
+**/.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+
+# Local assistant metadata
+.agents/
+.claude/
+skills-lock.json
+CONTEXT.md
+
+# Local-only planning and private drafts
+.private-docs/
+docs/issues/
+
+# Store screenshot staging: reviewed PNGs stay out of Git by default
+screenshots/

@@ -1,0 +1,166 @@
+# Model Assets
+
+PromptSkjold runs detection locally in the browser. Deterministic recognizers are built from Rust to WebAssembly, and optional transformer NER uses model assets packaged with the extension. The public beta source is published at `git@github.com:segiITU/PromptSkjold.git`.
+
+## Default model (what the extension ships)
+
+The default model, key `bardsai-mini`, is the 21.8 MB int8 Danish/English model published at <https://huggingface.co/ermias-ai/da-pii-mini-preview-21m>. Fetch it with:
+
+```bash
+npm run fetch:model
+```
+
+The script copies the committed tokenizer and config files from `vendor-data/model/bardsai-mini-da-en/` and downloads `onnx/model_quantized.onnx` into `generated/models/ner/bardsai-mini-da-en/`, checking its SHA-256 (`29dfc1c3...`, md5 `c4d3c42f...`). The sections below describe the larger multilingual BardsAI configuration, which is optional and not packaged by default.
+
+## Optional: BardsAI EU multilingual model
+
+The official public beta package uses BardsAI EU multilingual NER assets prepared under:
+
+```text
+generated/models/ner/bardsai-eu-pii-anonimization-multilang/
+```
+
+Required release assets:
+
+```text
+config.json
+tokenizer.json
+tokenizer_config.json
+onnx/model_q4f16.onnx
+onnx/model_q4f16.onnx.data
+onnx/model_fp16.onnx
+onnx/model_fp16.onnx.data
+```
+
+Both generated transformer artifacts (`model_q4f16` and `model_fp16`) use ONNX external-data format: a small graph protobuf plus a `.onnx.data` weights sidecar. Embedded-weight protobufs force ONNX Runtime to copy all weights through the never-shrinking wasm heap during session init, which held multiple GB of RAM until the offscreen document closed. Only `model_q4f16` is packaged with the extension: it serves both the WebGPU path and the CPU/WASM fallback, and it is the only WebGPU dtype the UI offers (`NER_WEBGPU_DTYPE_CHOICES`). `model_fp16` stays in the generated directory as the baseline the q4f16 artifact is quantized from; neither it nor the q8 `model_quantized.onnx` artifact is packaged (see `EXCLUDED_MODEL_ASSET_GLOBS` in `scripts/extension-packaging.js`).
+
+The generated directory is ignored by Git. Prepared model assets are release artifacts, not source files.
+
+## Why Assets Are Not Committed
+
+Model and runtime artifacts are not committed because they are large generated files with their own upstream licensing, provenance, and review requirements. Keeping them out of source control also makes the public repository easier to inspect and keeps the public initial commit focused on source code, tests, docs, and build scripts.
+
+Official release packages must still include the prepared runtime assets. The release checklist should verify the exact package contents and attach the package checksum to the GitHub pre-release.
+
+## Prepare BardsAI Assets
+
+Create a Python environment for conversion tools:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -U "huggingface_hub[cli]" onnx onnxruntime onnx-ir sympy tokenizers
+```
+
+Download the needed upstream files into the local source cache:
+
+```bash
+mkdir -p .model-sources
+hf download bardsai/eu-pii-anonimization-multilang \
+  --revision 6de9f686549277a3dd4233ebce14d8117ffbe128 \
+  --include "config.json" \
+  --include "tokenizer.json" \
+  --include "tokenizer_config.json" \
+  --include "vocab.txt" \
+  --include "special_tokens_map.json" \
+  --include "onnx/model.onnx" \
+  --include "onnx/model_quantized.onnx" \
+  --include "onnx/model_fp16.onnx" \
+  --local-dir .model-sources/bardsai-eu-pii-anonimization-multilang
+```
+
+Prepare the runtime copy:
+
+```bash
+npm run prepare:model:bardsai -- \
+  --source-dir .model-sources/bardsai-eu-pii-anonimization-multilang \
+  --force
+```
+
+The prep script verifies tokenizer metadata, copies tokenizer files, copies or creates `model_quantized.onnx` as a generated comparison/byproduct artifact, copies or creates `model_fp16.onnx`, and writes an asset manifest. Release packaging excludes `model_quantized.onnx`; q4f16 is the active CPU/WASM fallback.
+
+Repackage the embedded fp16 model as ONNX external data (in place, under `generated/models`):
+
+```bash
+npm run convert:model:external-data -- --model bardsai-fp16
+```
+
+Pass `--force` to overwrite an existing `model_fp16.onnx.data`. The script verifies that the `location` recorded inside the protobuf matches the file name the runtime passes to ONNX Runtime (`session_options.externalData` in `src/shared/constants.ts`) and runs the ONNX checker on the result.
+
+Generate the q4f16 artifact pair:
+
+```bash
+npm run convert:model:q4f16:bardsai
+```
+
+The script quantizes the fp16 model (or creates an fp16 intermediate from `onnx/model.onnx`) with ONNX Runtime's MatMulNBits 4-bit weight-only quantization. Defaults are `bits=4`, `block_size=32`, symmetric weights, `QOperator` format, `MatMul` ops only; see `--help` for overrides. The output is written directly in external-data format (`model_q4f16.onnx` plus `model_q4f16.onnx.data`) together with a conversion manifest, so no separate external-data repackaging step is needed. Validation asserts that every external tensor records the `model_q4f16.onnx.data` location the runtime passes to ONNX Runtime via `session_options.externalData`, and the manifest records size and SHA-256 for both the graph and the weights sidecar. Pass `--force` to replace an existing output. The Python environment additionally needs `onnx-ir` for the MatMulNBits quantizer import.
+
+## Reproducible Optimized Release Model
+
+For the optimized BardsAI release model, start with a prepared **external-data**
+fp16 baseline in a temporary directory, then run the single optimization command.
+Keeping the baseline separate means the command can safely write the final
+runtime model to the standard generated path.
+
+```bash
+npm run prepare:model:bardsai -- \
+  --source-dir .model-sources/bardsai-eu-pii-anonimization-multilang \
+  --output-dir /private/tmp/bardsai-fp16-baseline \
+  --python .venv/bin/python \
+  --force
+
+node scripts/convert-onnx-to-external-data.js \
+  --input /private/tmp/bardsai-fp16-baseline/onnx/model_fp16.onnx \
+  --python .venv/bin/python \
+  --force
+
+npm run optimize:model:bardsai -- \
+  --source-dir /private/tmp/bardsai-fp16-baseline \
+  --output-dir generated/models/ner/bardsai-eu-pii-anonimization-multilang \
+  --python .venv/bin/python \
+  --force
+```
+
+The optimizer preserves the EU-script tokenizer rows, replaces the fp16 word
+embedding table with per-row int8 plus fp16 scales, creates the q4f16 MatMul
+artifact, and rejects label changes on the multilingual synthetic PII samples.
+It never modifies the supplied baseline and only replaces the final output
+after every transformation and validation succeeds, so a failed `--force` run
+keeps the last working artifact. Both source and generated model directories
+remain ignored by Git. Use Python 3.10 or newer for this step:
+the required ONNX Runtime MatMulNBits API is unavailable in the Python 3.9
+runtime bundled with older macOS releases.
+
+If the source directory only has PyTorch or safetensors weights, export ONNX first with Optimum, then pass the exported directory to `prepare:model:bardsai`.
+
+## Build With Assets Required
+
+Use strict model enforcement for release validation:
+
+```bash
+NER_MODEL_ASSETS_REQUIRED=1 npm run build
+```
+
+This fails when required BardsAI files are missing. A normal `npm run build` allows the extension to build without the transformer model so developers can run model-free checks.
+
+## Optional Comparison Assets
+
+The repository still contains preparation scripts for deprecated or comparison models:
+
+- `npm run prepare:model:hikmaai`
+- `npm run prepare:model:ai4privacy`
+- `npm run convert:model:fp16`
+
+These are not the standard public beta runtime model. AI4Privacy assets are treated as local research/prototype assets and are not included in the official beta package.
+
+## Licensing Caveats
+
+Project source code is Apache-2.0, but bundled model, runtime, font, and npm/Cargo dependencies keep their own licenses. Before packaging a public release:
+
+1. Review upstream model license and provenance.
+2. Review ONNX Runtime Web and transformers.js distribution terms.
+3. Update `THIRD_PARTY_NOTICES.md` if bundled assets change.
+4. Keep generated model sources and prepared assets out of Git.
+
+Do not make benchmark, accuracy, compliance, or prevention claims from model inclusion alone.

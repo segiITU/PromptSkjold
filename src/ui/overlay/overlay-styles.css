@@ -1,0 +1,664 @@
+/*
+ * PromptSkjold review overlay ("Gennemgang").
+ *
+ * Loaded as a raw string by overlay.ts and injected into the overlay's closed
+ * Shadow Root. Tokens, category marks and the lines motif are inlined from the
+ * shared stylesheets so the popup, options page and this overlay stay in step.
+ * Fonts are registered in the host page (src/ui/shared/page-fonts.ts), because
+ * @font-face inside a shadow root is ignored.
+ */
+@import url("../../shared/styles/tokens.vars.css");
+@import url("../../shared/styles/categories.css");
+@import url("../../shared/styles/motif.css");
+
+:host {
+  all: initial;
+}
+
+.pg-overlay-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--scrim);
+  color: var(--ink);
+  font: 400 14px/1.5 var(--f-ui);
+  letter-spacing: normal;
+  text-transform: none;
+  text-align: left;
+  animation: pk-fade 0.25s ease both;
+}
+.pg-overlay-backdrop *,
+.pg-overlay-backdrop *::before,
+.pg-overlay-backdrop *::after {
+  box-sizing: border-box;
+}
+.pg-overlay-backdrop h2,
+.pg-overlay-backdrop h3,
+.pg-overlay-backdrop p,
+.pg-overlay-backdrop ul {
+  margin: 0;
+  padding: 0;
+}
+.pg-overlay-backdrop ul {
+  list-style: none;
+}
+.pg-overlay-backdrop button,
+.pg-overlay-backdrop select,
+.pg-overlay-backdrop input {
+  font: inherit;
+  color: inherit;
+}
+.pg-overlay-backdrop button {
+  cursor: pointer;
+}
+.pg-overlay-backdrop :focus-visible {
+  outline: 2.5px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+@keyframes pk-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* the sheet */
+.pk-sheet {
+  width: min(1180px, 100%);
+  max-height: min(780px, 100%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  overflow: hidden;
+  background: var(--sheet);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lift);
+  animation: pk-rise 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes pk-rise {
+  from { transform: translateY(36px) scale(0.985); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.pk-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 24px 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.pk-logo {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: block;
+}
+.pk-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.pk-title {
+  font: 600 23px/1.2 var(--f-ui);
+  font-variant-numeric: lining-nums;
+  letter-spacing: -0.005em;
+  margin-bottom: 2px;
+}
+.pk-sub {
+  color: var(--ink-3);
+  font-size: 13.5px;
+  max-width: 72ch;
+}
+
+/* buttons */
+.pk-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--r-pill);
+  border: 1.5px solid transparent;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: transform 0.12s, background-color 0.15s, border-color 0.15s;
+}
+.pk-btn:active {
+  transform: translateY(1px);
+}
+.pk-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.pk-btn-primary {
+  background: var(--teal);
+  color: var(--ink);
+  padding: 12px 24px;
+  font-size: 15px;
+}
+.pk-btn-primary:hover {
+  background: var(--teal-hover);
+}
+.pk-btn-outline {
+  background: transparent;
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.pk-btn-outline:hover {
+  background: rgb(27 27 26 / 6%);
+}
+.pk-btn-quiet {
+  background: transparent;
+  color: var(--ink-2);
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.pk-btn-quiet:hover {
+  background: rgb(27 27 26 / 7%);
+  color: var(--ink);
+}
+.pk-link {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  color: var(--teal-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+/* body: the one scroll container */
+.pk-body {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.pk-finds {
+  padding: 18px 20px 20px 24px;
+  border-right: 1px solid var(--line);
+  background: var(--paper);
+}
+.pk-finds-h {
+  font: 600 12.5px/1.2 var(--f-ui);
+  color: var(--ink-2);
+  letter-spacing: 0.01em;
+  margin-bottom: 6px;
+}
+.pk-fi {
+  padding: 10px 0 11px;
+  border-top: 1px solid var(--line);
+}
+.pk-fi:first-child {
+  border-top: 0;
+}
+.pk-fi-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+.pk-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 600 12.5px/1.2 var(--f-ui);
+  color: var(--ink-2);
+}
+.pk-type {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--ink-2);
+  font: 600 12.5px/1.2 var(--f-ui);
+  cursor: pointer;
+  max-width: 11em;
+  text-overflow: ellipsis;
+}
+.pk-type option {
+  color: var(--ink);
+}
+.pk-conf {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pk-conf.low {
+  color: var(--warn);
+  font-weight: 600;
+}
+.pk-fi-val {
+  font-weight: 600;
+  font-size: 14.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  margin-bottom: 2px;
+}
+.pk-fi-ph {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+  min-height: 19px;
+}
+.pk-fi-ph .pk-tag {
+  font-size: 12px;
+}
+.pk-fi.off .pk-fi-val {
+  color: var(--ink-2);
+}
+.pk-seg {
+  display: flex;
+  width: 100%;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  padding: 2px;
+}
+.pk-seg button {
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: 4px 4px;
+  border-radius: var(--r-pill);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.pk-seg button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+.pk-seg button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* advanced action: out of sight until the card is hovered or has focus */
+.pk-more {
+  margin-top: 4px;
+  opacity: 0;
+  height: 0;
+  overflow: hidden;
+  display: block;
+  transition: opacity 0.15s;
+}
+.pk-fi:hover .pk-more,
+.pk-fi:focus-within .pk-more {
+  opacity: 1;
+  height: auto;
+}
+.pk-sens {
+  border-top: 1px solid var(--line);
+  margin-top: 10px;
+  padding-top: 10px;
+}
+.pk-sens summary {
+  cursor: pointer;
+  font: 600 12.5px/1.2 var(--f-ui);
+  color: var(--ink-3);
+}
+.pk-sens .pk-conf-row {
+  border-top: 0;
+  margin-top: 6px;
+  padding-top: 0;
+}
+.pk-manual {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.pk-manual small {
+  display: block;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.pk-x {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+.pk-x:hover {
+  background: rgb(27 27 26 / 9%);
+  color: var(--ink);
+}
+.pk-x svg {
+  width: 12px;
+  height: 12px;
+}
+.pk-code {
+  border-top: 1px solid var(--line);
+  margin-top: 6px;
+  padding-top: 8px;
+}
+.pk-code summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.pk-conf-row {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 10px;
+  padding-top: 12px;
+}
+.pk-conf-row label {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.pk-conf-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--ink);
+  height: 24px;
+  margin: 0;
+}
+
+/* the two sheets of paper */
+.pk-papers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+  padding: 18px 22px 24px;
+  min-height: 0;
+  background: var(--desk);
+}
+.pk-paper {
+  padding: 14px 18px 8px;
+  background: var(--sheet-warm);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+.pk-paper-out {
+  background: var(--sheet-out);
+}
+.pk-paper-h {
+  font: 600 12.5px/1.2 var(--f-ui);
+  color: var(--ink-3);
+  margin: 0 0 8px;
+}
+.pk-letter {
+  font: 400 15.5px/1.7 var(--f-voice);
+  font-variant-numeric: lining-nums;
+}
+.pk-letter p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0 0 12px;
+}
+
+/* nothing found / nothing to replace */
+.pk-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 36px 16px 44px;
+  text-align: center;
+}
+.pk-empty p {
+  color: var(--ink-3);
+  max-width: 44ch;
+}
+
+/* footer */
+.pk-notes {
+  padding: 8px 24px 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.pk-notes p + p {
+  margin-top: 4px;
+}
+.pk-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 14px 24px 16px;
+  background: var(--sheet);
+}
+.pk-foot-left,
+.pk-foot-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.pk-summary {
+  font: 500 14px/1.2 var(--f-ui);
+  font-variant-numeric: lining-nums;
+}
+
+/* the one-off highlighter sweep when the sheet opens */
+.pk-sheet:not([data-seen]) .pk-mk {
+  animation: pk-sweep 0.55s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+  animation-delay: 380ms;
+}
+@keyframes pk-sweep {
+  from { background-size: 0 100%; text-decoration-color: transparent; box-shadow: none; }
+  to { background-size: 100% 100%; }
+}
+
+/* toast inside the overlay */
+.pk-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: var(--r-pill);
+  padding: 11px 20px;
+  font-weight: 500;
+  box-shadow: 0 14px 30px -10px rgb(0 0 0 / 50%);
+  animation: pk-toast 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes pk-toast {
+  from { opacity: 0; transform: translate(-50%, 14px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* mark-as-personal-data dialog (when text is selected in "your text") */
+.pk-mark {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 340px;
+  max-width: calc(100% - 32px);
+  background: var(--sheet);
+  border: 1.5px solid var(--ink);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  animation: pk-rise 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.pk-mark-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 8px 16px;
+}
+.pk-mark-head h3 {
+  font: 600 15px/1.2 var(--f-ui);
+}
+.pk-mark-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 12px;
+}
+.pk-kicker {
+  font: 600 12px/1.2 var(--f-ui);
+  color: var(--ink-3);
+}
+.pk-snippet {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font: 400 14px/1.4 var(--f-voice);
+  overflow-wrap: anywhere;
+  max-height: 4.5em;
+  overflow: hidden;
+}
+.pk-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pk-types button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1.5px solid var(--line-2);
+  border-radius: var(--r-pill);
+  padding: 4px 10px 4px 8px;
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--c);
+}
+.pk-types button[aria-pressed="true"] {
+  border-color: var(--c);
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+}
+.pk-types .pk-ic {
+  margin: 0;
+  vertical-align: 0;
+}
+.pk-mark-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+}
+.pk-btn-sm {
+  padding: 7px 14px;
+  font-size: 13px;
+}
+
+/* image review */
+.pk-image-wrap {
+  grid-column: 1 / -1;
+  padding: 0;
+}
+.pk-image-tabs {
+  display: inline-flex;
+  border: 1.5px solid var(--ink);
+  border-radius: var(--r-pill);
+  padding: 2px;
+  margin-bottom: 12px;
+}
+.pk-image-tabs button {
+  border: 0;
+  background: none;
+  padding: 5px 14px;
+  border-radius: var(--r-pill);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.pk-image-tabs button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+.pk-image-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  background: var(--sheet-warm);
+  border: 1px solid #dedbd2;
+  border-radius: 6px;
+  box-shadow: 0 20px 26px -16px rgb(27 27 26 / 42%);
+  overflow: hidden;
+}
+.pk-image-stage img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.pg-overlay-backdrop .pk-image-box {
+  position: absolute;
+  padding: 0;
+  margin: 0;
+  background: color-mix(in srgb, var(--c) 18%, transparent);
+  border: 2px solid var(--c);
+  border-radius: 3px;
+}
+.pg-overlay-backdrop .pk-image-box.pk-off {
+  background: none;
+  border-style: dotted;
+  border-color: var(--ink-3);
+}
+.pg-overlay-backdrop .pk-image-box-black {
+  background: var(--ink);
+  border: 0;
+  border-radius: 2px;
+}
+.pk-file {
+  font: 600 13px/1.3 var(--f-ui);
+  color: var(--ink-2);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .pk-papers { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .pk-body { grid-template-columns: 1fr; }
+  .pk-finds { border-right: 0; border-bottom: 1px solid var(--line); }
+  .pk-foot { flex-direction: column; align-items: stretch; padding: 10px 16px 14px; gap: 10px; }
+  .pk-foot-right { order: -1; justify-content: space-between; flex-wrap: nowrap; }
+  .pk-foot-right .pk-btn { flex: 1; }
+  .pk-summary { font-size: 14px; flex: none; }
+  .pk-foot-left { flex-wrap: nowrap; }
+  .pk-foot-left .pk-btn { flex: 1; padding: 9px 10px; font-size: 13px; }
+  .pk-notes { padding: 8px 16px; font-size: 12px; }
+  .pk-head { padding: 14px 16px 12px; }
+  .pk-title { font-size: 21px; }
+  .pk-papers { padding: 16px; }
+}
+@media (max-width: 480px) {
+  .pg-overlay-backdrop { padding: 8px; }
+  .pk-letter { font-size: 15px; }
+  .pk-mark { right: 8px; bottom: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pg-overlay-backdrop,
+  .pg-overlay-backdrop *,
+  .pg-overlay-backdrop *::before,
+  .pg-overlay-backdrop *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

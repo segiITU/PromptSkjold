@@ -1,0 +1,4 @@
+{
+  "extName": { "message": "PromptSkjold" },
+  "extDescription": { "message": "Gennemse og erstat personoplysninger i tekst, før du sender den til AI-chats. Kører lokalt i din browser. Et hjælpemiddel, ikke en garanti." }
+}

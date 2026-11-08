@@ -1,0 +1,1 @@
+{"tokenizer_class":"XLMRobertaTokenizer","model_max_length":512,"bos_token":"<s>","eos_token":"</s>","sep_token":"</s>","cls_token":"<s>","unk_token":"<unk>","pad_token":"<pad>","mask_token":"<mask>"}

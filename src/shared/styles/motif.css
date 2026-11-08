@@ -1,0 +1,65 @@
+/*
+ * The logo's idea as a reusable motif: lines of text with a marker bar across
+ * the middle. Used for "scanning", "nothing found" and empty states.
+ * <div class="pk-lines" data-state="scan|empty|done"> with 4 <i> lines and one <b> bar.
+ */
+.pk-lines {
+  --lw: 100%;
+  position: relative;
+  display: grid;
+  gap: 9px;
+  width: min(220px, 100%);
+  padding: 6px 0;
+}
+.pk-lines i {
+  display: block;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--teal);
+  opacity: 0.9;
+  transform-origin: left center;
+}
+.pk-lines i:nth-child(1) { width: 78%; }
+.pk-lines i:nth-child(2) { width: 100%; }
+.pk-lines i:nth-child(4) { width: 92%; }
+.pk-lines i:nth-child(5) { width: 54%; }
+.pk-lines b {
+  display: block;
+  height: 14px;
+  border-radius: 4px 7px 5px 4px;
+  background: var(--ink);
+  transform-origin: left center;
+  margin: -1px -6px;
+  transform: scaleX(0);
+}
+.pk-lines[data-state="empty"] b,
+.pk-lines[data-state="done"] b {
+  transform: scaleX(1);
+}
+.pk-lines[data-state="scan"] b {
+  animation: pk-bar 1.8s cubic-bezier(0.5, 0, 0.2, 1) infinite;
+}
+.pk-lines[data-state="scan"] i {
+  animation: pk-line 1.8s ease-in-out infinite;
+}
+.pk-lines[data-state="scan"] i:nth-child(2) { animation-delay: 0.12s; }
+.pk-lines[data-state="scan"] i:nth-child(4) { animation-delay: 0.24s; }
+.pk-lines[data-state="scan"] i:nth-child(5) { animation-delay: 0.36s; }
+@keyframes pk-bar {
+  0% { transform: scaleX(0); opacity: 1; }
+  45% { transform: scaleX(1); opacity: 1; }
+  80% { transform: scaleX(1); opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+@keyframes pk-line {
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 0.45; }
+}
+.pk-lines.sm { width: 64px; gap: 5px; }
+.pk-lines.sm i { height: 5px; }
+.pk-lines.sm b { height: 9px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-lines[data-state="scan"] b { animation: none; transform: scaleX(1); }
+  .pk-lines[data-state="scan"] i { animation: none; }
+}

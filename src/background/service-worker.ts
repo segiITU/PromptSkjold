@@ -1,0 +1,889 @@
+import type {
+  CancelDetectionRequest,
+  DetectPiiRequest,
+  OcrImageRequest,
+  OcrResultResponse,
+  RedactPdfRequest,
+  RedactPdfResponse,
+  DetectionCanceledResponse,
+  GetNerStatusRequest,
+  Message,
+  NerProviderMode,
+  NerStatusResponse,
+  OpenOptionsPageRequest,
+  PiiResultResponse,
+  SystemCompatibilityStatusResponse,
+  SystemSignalsResponse,
+} from "../shared/message-types";
+import { loadSettings, saveSettings, logFeedback, purgeExpiredFeedback } from "../shared/storage";
+import { findUserSiteHost, isCuratedUrl, loadUserSiteHosts, USER_SITES_KEY } from "../shared/user-sites";
+import { syncUserSites as syncUserSitesOrThrow } from "./user-sites";
+import { removeLegacyDownloadedPack } from "../ocr/asset-store";
+import { openOnboardingOnInstall } from "../shared/onboarding-storage";
+import { TESSERACT_ENGINE_ID } from "../ocr/engine-ids";
+import { detectionOptionsFromSettings, fallbackNerStatus } from "../shared/detection-config";
+import { DEFAULT_SETTINGS, LOCAL_AI_ACTIVITY_WINDOW_MS } from "../shared/constants";
+import { shouldAutoWarmLocalAi } from "../shared/local-ai-warmup-gate";
+import { sendOffscreenRequest } from "../shared/offscreen-protocol";
+import { detectionFailed, requirePiiResult } from "../shared/detection-result";
+import { handleVaultMessage } from './vault-operations';
+import {
+  buildSystemCheckResult,
+  loadSystemCheckResult,
+  markCriticalModalDismissed,
+  recordLoadFailure,
+  recordLocalAiEnabled,
+  recordLowMemoryAutoDisable,
+  recordLowMemoryOverride,
+  recordRecommendationDeclined,
+  recordRuntimeState,
+  recordUserLocalAiOff,
+  saveSystemCheckResult,
+  type SystemCheckResult,
+} from "../shared/system-check-storage";
+
+/** Set-up problems are recorded per site; a failure here must not break the worker's other duties. */
+function syncUserSites(): Promise<void> {
+  return syncUserSitesOrThrow().catch((error) => {
+    console.warn("[PromptSkjold] could not sync user sites", error);
+  });
+}
+
+const OFFSCREEN_URL = "offscreen/offscreen.html";
+const SYSTEM_CHECK_OFFSCREEN_URL = "system-check/system-check-offscreen.html";
+const SETTINGS_KEY = "pg_settings";
+const ACTIVE_ICON_PATHS = {
+  16: "/assets/icons/active-16.png",
+  32: "/assets/icons/active-32.png",
+  48: "/assets/icons/active-48.png",
+  128: "/assets/icons/active-128.png",
+};
+const INACTIVE_ICON_PATHS = {
+  16: "/assets/icons/inactive-16.png",
+  32: "/assets/icons/inactive-32.png",
+  48: "/assets/icons/inactive-48.png",
+  128: "/assets/icons/inactive-128.png",
+};
+let offscreenCreating: Promise<void> | null = null;
+/**
+ * Cached handshake confirming the current offscreen document's onMessage
+ * listener is attached. Cleared when the offscreen is closed so the next
+ * ensureOffscreen re-handshakes the freshly created document.
+ */
+let offscreenReady: Promise<void> | null = null;
+const canceledDetectionIds = new Set<string>();
+let offscreenBusyCount = 0;
+let offscreenIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let lastOffscreenActivityAt = 0;
+let lastSupportedPageActivityAt = 0;
+let lastSupportedPageActivityTabId: number | null = null;
+let activityWarmupInFlight: Promise<void> | null = null;
+
+function invalidateOffscreenReady(): void {
+  offscreenReady = null;
+}
+
+function clearOffscreenIdleTimer(): void {
+  if (!offscreenIdleTimer) return;
+  clearTimeout(offscreenIdleTimer);
+  offscreenIdleTimer = null;
+}
+
+function canceledResponse(requestId: string): DetectionCanceledResponse {
+  return {
+    type: "DETECTION_CANCELED",
+    payload: { requestId },
+  };
+}
+
+function rememberCanceledDetection(requestId: string): void {
+  canceledDetectionIds.add(requestId);
+  setTimeout(() => canceledDetectionIds.delete(requestId), 300000);
+}
+
+function timeout(ms: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("Timed out waiting for offscreen cancellation")), ms);
+  });
+}
+
+async function closeOffscreenBestEffort(): Promise<void> {
+  clearOffscreenIdleTimer();
+  try {
+    const existing = await (chrome.offscreen as any).hasDocument();
+    if (existing) {
+      await (chrome.offscreen as any).closeDocument();
+    }
+  } catch {
+    // Best effort: Chrome may already have torn down the document.
+  } finally {
+    invalidateOffscreenReady();
+  }
+}
+
+/** Built-in sites, plus the sites the user added themselves. */
+async function isSupportedPageUrl(url: string | undefined, settings: Awaited<ReturnType<typeof loadSettings>>): Promise<boolean> {
+  if (!url) return false;
+  if (isCuratedUrl(url, settings.curatedUrls)) return true;
+  return findUserSiteHost(url, await loadUserSiteHosts()) !== null;
+}
+
+async function hasRecentForegroundSupportedPageActivity(settings: Awaited<ReturnType<typeof loadSettings>>): Promise<boolean> {
+  if (!settings.keepLocalAiLoadedWhileActive) return false;
+  if (!lastSupportedPageActivityTabId) return false;
+  if (Date.now() - lastSupportedPageActivityAt > LOCAL_AI_ACTIVITY_WINDOW_MS) return false;
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return Boolean(
+    activeTab?.id === lastSupportedPageActivityTabId
+    && await isSupportedPageUrl(activeTab.url, settings),
+  );
+}
+
+async function scheduleOffscreenIdleUnload(): Promise<void> {
+  clearOffscreenIdleTimer();
+  if (offscreenBusyCount > 0) return;
+
+  const settings = await loadSettings();
+  if (settings.localAiUnloadTimeoutMs === null) return;
+
+  const existing = await (chrome.offscreen as any).hasDocument();
+  if (!existing) return;
+
+  const activePageKeepsRuntime = await hasRecentForegroundSupportedPageActivity(settings);
+  const lastRelevantActivityAt = Math.max(
+    lastOffscreenActivityAt,
+    activePageKeepsRuntime ? lastSupportedPageActivityAt : 0,
+  );
+  const elapsedMs = Date.now() - lastRelevantActivityAt;
+  const remainingMs = Math.max(0, settings.localAiUnloadTimeoutMs - elapsedMs);
+
+  if (remainingMs === 0) {
+    await closeOffscreenBestEffort();
+    return;
+  }
+
+  offscreenIdleTimer = setTimeout(() => {
+    void scheduleOffscreenIdleUnload();
+  }, remainingMs);
+}
+
+async function withOffscreenOperation<T>(operation: () => Promise<T>): Promise<T> {
+  clearOffscreenIdleTimer();
+  offscreenBusyCount += 1;
+  try {
+    await ensureOffscreen();
+    return await operation();
+  } finally {
+    offscreenBusyCount = Math.max(0, offscreenBusyCount - 1);
+    lastOffscreenActivityAt = Date.now();
+    void scheduleOffscreenIdleUnload();
+  }
+}
+
+async function persistWarmupOutcome(status: NerStatusResponse["payload"]): Promise<void> {
+  if (status.state === "failed" || status.state === "unavailable") {
+    const reason = status.message ?? "Local AI failed to load.";
+    const settings = await loadSettings();
+    if (settings.nerProvider === "transformers") {
+      await saveSettings({ nerProvider: "off" });
+    }
+    await recordLoadFailure(reason);
+    return;
+  }
+  await recordRuntimeState(status.state);
+}
+
+/** Waits before re-trying a failed warmup; a restarted offscreen document usually recovers on the first. */
+const WARMUP_RETRY_DELAYS_MS = [2_000, 10_000] as const;
+
+/** Missing assets and a disabled provider fail the same way every time. */
+function isTransientWarmupFailure(status: NerStatusResponse["payload"]): boolean {
+  return status.state === "failed" && !/Missing transformer NER assets/i.test(status.message ?? "");
+}
+
+async function warmUpOnce(
+  config: ReturnType<typeof detectionOptionsFromSettings>,
+  fallbackMode: NerProviderMode,
+  requestId: string,
+): Promise<NerStatusResponse> {
+  try {
+    return await withOffscreenOperation(async () => {
+      await sendOffscreenRequest({
+        type: "DETECT_PII",
+        payload: { requestId, text: "Alice from Acme visited Berlin.", config },
+      } satisfies DetectPiiRequest);
+      return sendOffscreenRequest({ type: "GET_NER_STATUS", payload: { config } });
+    });
+  } catch (err) {
+    return {
+      type: "NER_STATUS",
+      payload: fallbackNerStatus(fallbackMode, err instanceof Error ? err.message : String(err)),
+    };
+  }
+}
+
+/**
+ * Warm the model and record the outcome. A transient failure (a reloaded
+ * extension, a stale offscreen document) is retried on a fresh offscreen
+ * document before it turns Local AI off, because that state is sticky.
+ */
+async function warmUpWithRetry(
+  config: ReturnType<typeof detectionOptionsFromSettings>,
+  fallbackMode: NerProviderMode,
+  requestIdPrefix: string,
+): Promise<NerStatusResponse> {
+  let response = await warmUpOnce(config, fallbackMode, `${requestIdPrefix}-${Date.now()}`);
+  for (const delayMs of WARMUP_RETRY_DELAYS_MS) {
+    if (!isTransientWarmupFailure(response.payload)) break;
+    await closeOffscreenBestEffort();
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    response = await warmUpOnce(config, fallbackMode, `${requestIdPrefix}-${Date.now()}`);
+  }
+  await persistWarmupOutcome(response.payload);
+  return response;
+}
+
+async function applyCriticalLocalAiRecommendation(result: SystemCheckResult): Promise<SystemCheckResult> {
+  if (result.recommendation !== "auto-disable-local-ai" || result.lowMemoryOverride) {
+    return result;
+  }
+
+  const settings = await loadSettings();
+  if (settings.nerProvider === "transformers") {
+    await saveSettings({ nerProvider: "off" });
+    await closeOffscreenBestEffort();
+    return recordLowMemoryAutoDisable(result);
+  }
+
+  if (settings.nerProvider === "off" && result.localAiState === "enabled") {
+    return recordUserLocalAiOff(result);
+  }
+
+  return result;
+}
+
+async function collectPassiveSignals(): Promise<SystemSignalsResponse["payload"]> {
+  await closeOffscreenBestEffort();
+  try {
+    await (chrome.offscreen as any).createDocument({
+      url: SYSTEM_CHECK_OFFSCREEN_URL,
+      reasons: ["WORKERS"],
+      justification: "Passive browser memory and WebGPU compatibility check",
+    });
+    const signalsResponse: SystemSignalsResponse = await chrome.runtime.sendMessage({ type: "COLLECT_SYSTEM_SIGNALS" });
+    return signalsResponse.payload;
+  } finally {
+    await closeOffscreenBestEffort();
+  }
+}
+
+async function runPassiveSystemCheck(): Promise<SystemCompatibilityStatusResponse> {
+  const previous = await loadSystemCheckResult();
+  if (previous) {
+    return { type: "SYSTEM_COMPATIBILITY_STATUS", payload: await reconcileSystemCheckWithSettings(previous) };
+  }
+
+  const signals = await collectPassiveSignals();
+  const result = await applyCriticalLocalAiRecommendation(buildSystemCheckResult(signals));
+  await saveSystemCheckResult(result);
+  return { type: "SYSTEM_COMPATIBILITY_STATUS", payload: result };
+}
+
+async function ensureSystemCheckResult(): Promise<SystemCompatibilityStatusResponse> {
+  const existing = await loadSystemCheckResult();
+  if (existing) {
+    return { type: "SYSTEM_COMPATIBILITY_STATUS", payload: await reconcileSystemCheckWithSettings(existing) };
+  }
+  return runPassiveSystemCheck();
+}
+
+async function reconcileSystemCheckWithSettings(result: SystemCheckResult): Promise<SystemCheckResult> {
+  if (result.localAiState !== "off-low-memory-auto" || result.tier === "critical") {
+    return result;
+  }
+
+  const settings = await loadSettings();
+  if (settings.nerProvider !== "off") return result;
+
+  const next: SystemCheckResult = {
+    ...result,
+    localAiState: "enabled",
+    criticalModal: "none",
+    lowMemoryOverride: false,
+    recommendationDeclinedAt: undefined,
+    loadFailure: undefined,
+  };
+  await saveSettings({ nerProvider: "transformers" });
+  await saveSystemCheckResult(next);
+  return next;
+}
+
+async function cancelOffscreenBestEffort(requestId: string): Promise<void> {
+  try {
+    await ensureOffscreen();
+    const request: CancelDetectionRequest = {
+      type: "CANCEL_DETECTION",
+      payload: { requestId },
+    };
+    await Promise.race([
+      sendOffscreenRequest(request),
+      timeout(500),
+    ]);
+  } catch {
+    // If the offscreen document is busy in a long model/WASM call, it may not
+    // process CANCEL_DETECTION promptly. Tear it down so extension UI (popup,
+    // options) remains responsive; the next detection recreates it.
+    await closeOffscreenBestEffort();
+  }
+}
+
+async function persistResolvedNerModel(config: DetectPiiRequest["payload"]["config"]): Promise<void> {
+  if (config?.ner_provider !== "transformers" || !config.ner_model) return;
+
+  try {
+    const request: GetNerStatusRequest = {
+      type: "GET_NER_STATUS",
+      payload: { config },
+    };
+    const response: NerStatusResponse = await sendOffscreenRequest(request);
+    const resolvedModel = response?.payload?.model;
+    if (response?.payload?.state === "ready" && resolvedModel && resolvedModel !== config.ner_model) {
+      await saveSettings({ nerModel: resolvedModel });
+    }
+  } catch {
+    // Best effort only. Detection already succeeded; a future popup/status
+    // refresh can still display the resolved offscreen status.
+  }
+}
+
+async function warmUpLocalAiFromActivity(settings: Awaited<ReturnType<typeof loadSettings>>): Promise<void> {
+  if (!settings.autoWarmLocalAiOnActiveSupportedPage || activityWarmupInFlight) return;
+
+  const systemStatus = (await ensureSystemCheckResult()).payload;
+  if (!shouldAutoWarmLocalAi(settings, systemStatus, null)) return;
+
+  activityWarmupInFlight = (async () => {
+    const config = detectionOptionsFromSettings(settings);
+    try {
+      await warmUpWithRetry(config, config.ner_provider ?? settings.nerProvider, "local-ai-active-page-warmup");
+    } finally {
+      activityWarmupInFlight = null;
+    }
+  })();
+
+  await activityWarmupInFlight;
+}
+
+async function recordSupportedPageActivity(
+  sender: chrome.runtime.MessageSender,
+  visible: boolean,
+): Promise<void> {
+  const tabId = sender.tab?.id;
+  if (typeof tabId !== "number") return;
+
+  if (!visible) {
+    if (lastSupportedPageActivityTabId === tabId) {
+      lastSupportedPageActivityTabId = null;
+    }
+    void scheduleOffscreenIdleUnload();
+    return;
+  }
+
+  const settings = await loadSettings();
+  if (!settings.enabled || settings.nerProvider === "off") return;
+  if (!(await isSupportedPageUrl(sender.tab?.url, settings))) return;
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (activeTab?.id !== tabId) return;
+
+  lastSupportedPageActivityAt = Date.now();
+  lastSupportedPageActivityTabId = tabId;
+  void scheduleOffscreenIdleUnload();
+  void warmUpLocalAiFromActivity(settings);
+}
+
+/**
+ * Wait until the offscreen document's `onMessage` listener is attached. After
+ * `chrome.offscreen.createDocument` resolves the page exists, but its bundle
+ * loads asynchronously, so forwarded messages can throw "Receiving end does
+ * not exist" until the listener registers. Ping with a short backoff until we
+ * get a pong (or give up after ~1s — at which point any forwarded call will
+ * surface its own error).
+ */
+async function waitForOffscreenReady(attempts = 20, delayMs = 50): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const pong = await sendOffscreenRequest({ type: "OFFSCREEN_PING" });
+      if ((pong as { type?: string } | undefined)?.type === "OFFSCREEN_PONG") return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/Receiving end does not exist|message channel closed/i.test(message)) {
+        return;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
+/**
+ * Ensure the offscreen document exists AND its message listener is attached.
+ * Concurrent callers serialise on a single creation promise and a single
+ * handshake promise so a second caller can't slip through with hasDocument
+ * returning true before the listener has registered.
+ */
+async function ensureOffscreen(): Promise<void> {
+  const existing = await (chrome.offscreen as any).hasDocument();
+  if (!existing) {
+    invalidateOffscreenReady();
+    if (offscreenCreating) {
+      await offscreenCreating;
+    } else {
+      offscreenCreating = (chrome.offscreen as any).createDocument({
+        url: OFFSCREEN_URL,
+        reasons: ["WORKERS"],
+        justification: "WASM PII detection pipeline",
+      });
+      try {
+        await offscreenCreating;
+      } finally {
+        offscreenCreating = null;
+      }
+    }
+  }
+
+  if (!offscreenReady) {
+    offscreenReady = waitForOffscreenReady();
+  }
+  await offscreenReady;
+}
+
+/** Handle messages from content scripts and popup. */
+chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
+  if (handleVaultMessage(message, sender, sendResponse)) return true;
+  if (!isBackgroundRequest(message)) {
+    return false;
+  }
+
+  let responded = false;
+  const safeSendResponse = (response: unknown): void => {
+    responded = true;
+    sendResponse(response);
+  };
+
+  handleMessage(message, sender, safeSendResponse).catch((err) => {
+    console.error('[PG:background] Message handling failed:', err);
+    if (!responded) {
+      safeSendResponse({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+  return true; // keep channel open for async response
+});
+
+function isBackgroundRequest(message: Message): boolean {
+  return message.type === "DETECT_PII"
+    || message.type === "OCR_IMAGE"
+    || message.type === "REDACT_PDF"
+    || message.type === "CANCEL_DETECTION"
+    || message.type === "GET_NER_STATUS"
+    || message.type === "LOG_FEEDBACK"
+    || message.type === "OPEN_OPTIONS_PAGE"
+    || message.type === "GET_SYSTEM_COMPATIBILITY_STATUS"
+    || message.type === "SET_LOCAL_AI_DETECTION"
+    || message.type === "WARM_UP_LOCAL_AI"
+    || message.type === "SUPPORTED_PAGE_ACTIVITY"
+    || message.type === "DISMISS_CRITICAL_LOCAL_AI_MODAL"
+    || message.type === "RE_RUN_SYSTEM_CHECK"
+    || message.type === "APPLY_CRITICAL_RECOMMENDATION";
+}
+
+async function handleMessage(
+  message: Message,
+  sender: chrome.runtime.MessageSender,
+  sendResponse: (response: unknown) => void,
+): Promise<void> {
+  switch (message.type) {
+    case "DETECT_PII": {
+      const settings = await loadSettings();
+      const config = detectionOptionsFromSettings(settings, message.payload.config);
+      const request: DetectPiiRequest = {
+        ...message,
+        payload: { ...message.payload, config },
+      };
+      // Forward to offscreen document and relay response back. If explicit
+      // cancellation force-closes the offscreen document, translate the broken
+      // message channel back into a normal cancellation response.
+      try {
+        const response = await withOffscreenOperation(async () => {
+          const forwardedResponse = await sendOffscreenRequest(request);
+          if (forwardedResponse?.type !== 'DETECTION_CANCELED') requirePiiResult(forwardedResponse);
+          if ((forwardedResponse as PiiResultResponse | undefined)?.type === "PII_RESULT") {
+            await persistResolvedNerModel(config);
+          }
+          return forwardedResponse;
+        });
+        sendResponse(response);
+      } catch (err) {
+        if (canceledDetectionIds.delete(message.payload.requestId)) {
+          sendResponse(canceledResponse(message.payload.requestId));
+          break;
+        }
+        sendResponse(detectionFailed(message.payload.requestId, err));
+      }
+      break;
+    }
+
+    case "OCR_IMAGE": {
+      const settings = await loadSettings();
+      if (!settings.imageCheckEnabled) {
+        sendResponse({
+          type: "OCR_RESULT",
+          payload: { requestId: message.payload.requestId, status: "not-installed", text: "", spans: [], boxes: [], meanConfidence: 0, ms: 0 },
+        } satisfies OcrResultResponse);
+        break;
+      }
+      const config = detectionOptionsFromSettings(settings, message.payload.config);
+      const tabId = sender.tab?.id;
+      // Show that work is going on in the toolbar while the image is read.
+      if (typeof tabId === "number") {
+        void chrome.action.setBadgeBackgroundColor({ color: "#2563eb", tabId }).catch(() => undefined);
+        void chrome.action.setBadgeText({ text: "OCR", tabId }).catch(() => undefined);
+      }
+      const request: OcrImageRequest = { ...message, payload: { ...message.payload, config } };
+      try {
+        sendResponse(await withOffscreenOperation(() => sendOffscreenRequest(request)));
+        if (typeof tabId === "number") void chrome.action.setBadgeText({ text: "", tabId }).catch(() => undefined);
+      } catch (err) {
+        if (typeof tabId === "number") void chrome.action.setBadgeText({ text: "", tabId }).catch(() => undefined);
+        sendResponse({
+          type: "OCR_RESULT",
+          payload: {
+            requestId: message.payload.requestId,
+            status: "failed",
+            text: "",
+            spans: [],
+            boxes: [],
+            meanConfidence: 0,
+            ms: 0,
+            message: err instanceof Error ? err.message : String(err),
+          },
+        } satisfies OcrResultResponse);
+      }
+      break;
+    }
+
+    case "REDACT_PDF": {
+      const settings = await loadSettings();
+      const fail = (note: string): RedactPdfResponse => ({
+        type: "REDACT_PDF_RESULT",
+        payload: { requestId: message.payload.requestId, status: "failed", missed: message.payload.items, pages: 0, message: note },
+      });
+      if (!settings.imageCheckEnabled) {
+        sendResponse(fail("Attachment checking is turned off."));
+        break;
+      }
+      const tabId = sender.tab?.id;
+      if (typeof tabId === "number") {
+        void chrome.action.setBadgeBackgroundColor({ color: "#2563eb", tabId }).catch(() => undefined);
+        void chrome.action.setBadgeText({ text: "PDF", tabId }).catch(() => undefined);
+      }
+      try {
+        sendResponse(await withOffscreenOperation(() => sendOffscreenRequest(message as RedactPdfRequest)));
+      } catch (err) {
+        sendResponse(fail(err instanceof Error ? err.message : String(err)));
+      } finally {
+        if (typeof tabId === "number") void chrome.action.setBadgeText({ text: "", tabId }).catch(() => undefined);
+      }
+      break;
+    }
+
+    case "CANCEL_DETECTION": {
+      const { requestId } = message.payload;
+      rememberCanceledDetection(requestId);
+      sendResponse(canceledResponse(requestId));
+      void cancelOffscreenBestEffort(requestId);
+      break;
+    }
+
+    case "GET_NER_STATUS": {
+      const settings = await loadSettings();
+      const config = detectionOptionsFromSettings(settings, message.payload?.config);
+      if (config.ner_provider === "off") {
+        sendResponse({
+          type: "NER_STATUS",
+          payload: fallbackNerStatus("off", "Local AI detection is turned off."),
+        } satisfies NerStatusResponse);
+        break;
+      }
+
+      const request: GetNerStatusRequest = {
+        type: "GET_NER_STATUS",
+        payload: { config },
+      };
+      try {
+        const response: NerStatusResponse = await withOffscreenOperation(() => sendOffscreenRequest(request));
+        sendResponse(response);
+      } catch (err) {
+        sendResponse({
+          type: "NER_STATUS",
+          payload: fallbackNerStatus(
+            config.ner_provider ?? settings.nerProvider,
+            err instanceof Error ? err.message : String(err),
+          ),
+        } satisfies NerStatusResponse);
+      }
+      break;
+    }
+
+    case "LOG_FEEDBACK": {
+      await logFeedback(message.payload);
+      sendResponse({ ok: true });
+      break;
+    }
+
+    case "PII_RESULT": {
+      // This comes from the offscreen document — forward to the requesting tab
+      // The content script will receive this via its own message listener
+      sendResponse({ ok: true });
+      break;
+    }
+
+    case "OPEN_OPTIONS_PAGE": {
+      const req = message as OpenOptionsPageRequest;
+      await chrome.tabs.create({ url: req.payload.url });
+      sendResponse({ ok: true });
+      break;
+    }
+
+    case "GET_SYSTEM_COMPATIBILITY_STATUS": {
+      const response = await ensureSystemCheckResult();
+      sendResponse(response);
+      break;
+    }
+
+    case "WARM_UP_LOCAL_AI": {
+      const settings = await loadSettings();
+      const config = detectionOptionsFromSettings(settings, message.payload?.config);
+      if (config.ner_provider === "off") {
+        sendResponse({
+          type: "NER_STATUS",
+          payload: fallbackNerStatus("off", "Local AI detection is turned off."),
+        } satisfies NerStatusResponse);
+        break;
+      }
+
+      sendResponse(await warmUpWithRetry(config, config.ner_provider ?? settings.nerProvider, "local-ai-warmup"));
+      break;
+    }
+
+    case "SUPPORTED_PAGE_ACTIVITY": {
+      await recordSupportedPageActivity(sender, message.payload.visible);
+      sendResponse({ ok: true });
+      break;
+    }
+
+    case "RE_RUN_SYSTEM_CHECK": {
+      const signals = await collectPassiveSignals();
+      const previous = await loadSystemCheckResult();
+      const rebuilt = buildSystemCheckResult(signals, Date.now(), previous);
+      await saveSystemCheckResult(rebuilt);
+
+      const settings = await loadSettings();
+      const pendingCriticalRecommendation =
+        rebuilt.recommendation === "auto-disable-local-ai"
+        && settings.nerProvider === "transformers"
+        && !rebuilt.lowMemoryOverride;
+
+      sendResponse({
+        type: "SYSTEM_COMPATIBILITY_STATUS",
+        payload: rebuilt,
+        pendingCriticalRecommendation,
+      });
+      break;
+    }
+
+    case "APPLY_CRITICAL_RECOMMENDATION": {
+      const current = await loadSystemCheckResult();
+      if (!current) {
+        sendResponse({ error: "No stored system check result" });
+        break;
+      }
+      if (message.payload.accepted) {
+        const settings = await loadSettings();
+        if (settings.nerProvider === "transformers") {
+          await saveSettings({ nerProvider: "off" });
+        }
+        await closeOffscreenBestEffort();
+        const updated = await recordLowMemoryAutoDisable(current);
+        sendResponse({ type: "SYSTEM_COMPATIBILITY_STATUS", payload: updated } satisfies SystemCompatibilityStatusResponse);
+      } else {
+        const updated = await recordRecommendationDeclined();
+        sendResponse({
+          type: "SYSTEM_COMPATIBILITY_STATUS",
+          payload: updated ?? current,
+        } satisfies SystemCompatibilityStatusResponse);
+      }
+      break;
+    }
+
+    case "DISMISS_CRITICAL_LOCAL_AI_MODAL": {
+      const updated = await markCriticalModalDismissed();
+      sendResponse({ ok: true, payload: updated });
+      break;
+    }
+
+    case "SET_LOCAL_AI_DETECTION": {
+      const response = await ensureSystemCheckResult();
+      if (message.payload.enabled) {
+        await saveSettings({ nerProvider: "transformers" });
+        const updated = response.payload.tier === "critical"
+          ? await recordLowMemoryOverride()
+          : await recordLocalAiEnabled();
+        sendResponse({ type: "SYSTEM_COMPATIBILITY_STATUS", payload: updated ?? response.payload } satisfies SystemCompatibilityStatusResponse);
+      } else {
+        await saveSettings({ nerProvider: "off" });
+        await closeOffscreenBestEffort();
+        const current = await loadSystemCheckResult();
+        const updated = current ? await recordUserLocalAiOff(current) : response.payload;
+        sendResponse({ type: "SYSTEM_COMPATIBILITY_STATUS", payload: updated } satisfies SystemCompatibilityStatusResponse);
+      }
+      break;
+    }
+
+    default:
+      sendResponse({ error: "Unknown message type" });
+  }
+}
+
+/**
+ * Let content scripts reach `chrome.storage.session`.
+ *
+ * Session storage is where conversation records go for a profile with
+ * cross-session memory switched off: the pairs are the only copy of those
+ * originals, and a setting named for not remembering across sessions must not
+ * leave them in durable storage. Content scripts are untrusted contexts and
+ * cannot read that area until this is set, and the access level does not
+ * survive a service-worker restart, so it is set from module scope rather
+ * than from an install hook.
+ *
+ * Nothing depends on this succeeding — a profile where it fails keeps
+ * restoration for the life of the page and loses it on reload.
+ */
+function allowContentScriptSessionStorage(): void {
+  const session = chrome.storage?.session as
+    | (chrome.storage.StorageArea & {
+        setAccessLevel?: (options: { accessLevel: string }) => Promise<void>;
+      })
+    | undefined;
+  if (!session?.setAccessLevel) return;
+  void session
+    .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
+    .catch(() => undefined);
+}
+
+allowContentScriptSessionStorage();
+
+/** Initialize default settings on install. */
+chrome.runtime.onInstalled.addListener(async (details) => {
+  const settings = await loadSettings();
+  await saveSettings(settings);
+  await ensureSystemCheckResult();
+  // The language files used to be a download kept in Cache storage; they ship in the package now.
+  await removeLegacyDownloadedPack(TESSERACT_ENGINE_ID).catch(() => undefined);
+  await syncUserSites();
+  await purgeExpiredFeedback().catch(() => undefined);
+  // A short welcome guide, only after a fresh install and only once.
+  await openOnboardingOnInstall(details?.reason).catch(() => undefined);
+
+  await updateActiveTabIcon();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void purgeExpiredFeedback().catch(() => undefined);
+  void syncUserSites();
+  void updateActiveTabIcon();
+});
+
+// A site the user added is set up once Chrome grants its permission, even if
+// the popup that asked has closed by then; revoking one tears it down again.
+chrome.permissions.onAdded.addListener(() => {
+  void syncUserSites();
+});
+chrome.permissions.onRemoved.addListener(() => {
+  void syncUserSites();
+});
+
+/** Update icon based on active tab URL. */
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    if (lastSupportedPageActivityTabId !== activeInfo.tabId) {
+      lastSupportedPageActivityTabId = null;
+      void scheduleOffscreenIdleUnload();
+    }
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    await updateIcon(tab);
+  } catch {
+    // Tab may not exist.
+  }
+});
+
+chrome.tabs.onUpdated.addListener(async (_tabId, _changeInfo, tab) => {
+  if (typeof tab.id === "number" && tab.id === lastSupportedPageActivityTabId) {
+    const settings = await loadSettings();
+    if (!(await isSupportedPageUrl(tab.url, settings))) {
+      lastSupportedPageActivityTabId = null;
+      void scheduleOffscreenIdleUnload();
+    }
+  }
+  await updateIcon(tab);
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === "local" && changes[USER_SITES_KEY]) {
+    void syncUserSites().then(updateActiveTabIcon);
+  }
+  if (areaName === "local" && changes[SETTINGS_KEY]) {
+    const previousSettings = changes[SETTINGS_KEY].oldValue;
+    const nextSettings = changes[SETTINGS_KEY].newValue;
+    // Normalize against the default so the one-time migration that stamps the
+    // dtype onto previously-stored settings does not tear down the runtime.
+    const previousWebGpuDtype = previousSettings?.nerWebGpuDtype ?? DEFAULT_SETTINGS.nerWebGpuDtype;
+    const nextWebGpuDtype = nextSettings?.nerWebGpuDtype ?? DEFAULT_SETTINGS.nerWebGpuDtype;
+    if (nextSettings?.nerProvider === "off") {
+      void closeOffscreenBestEffort();
+    } else if (previousSettings?.enabled !== false && nextSettings?.enabled === false) {
+      // The global toggle stops all detection, so keeping the NER model in
+      // memory only burns RAM. Tear it down on the off-transition; leaving it
+      // alone on other writes while disabled avoids needless churn.
+      void closeOffscreenBestEffort();
+    } else if (previousWebGpuDtype !== nextWebGpuDtype) {
+      // A loaded pipeline pins its ONNX artifact (and its GPU/wasm memory).
+      // Closing the offscreen document frees it; the next detection recreates
+      // the document and loads the newly selected artifact.
+      void closeOffscreenBestEffort();
+    } else {
+      void scheduleOffscreenIdleUnload();
+    }
+    void updateActiveTabIcon();
+  }
+});
+
+async function updateActiveTabIcon(): Promise<void> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab) {
+    await updateIcon(tab);
+  }
+}
+
+async function updateIcon(tab: chrome.tabs.Tab): Promise<void> {
+  if (typeof tab.id !== "number") return;
+
+  const settings = await loadSettings();
+  const isMonitored = await isSupportedPageUrl(tab.url, settings);
+  const iconPath = settings.enabled && isMonitored ? ACTIVE_ICON_PATHS : INACTIVE_ICON_PATHS;
+
+  await chrome.action.setIcon({ path: iconPath, tabId: tab.id });
+  await chrome.action.setBadgeText({ text: "", tabId: tab.id });
+}

@@ -1,0 +1,123 @@
+/*
+ * Category marks shared by the review overlay, the popup and the in-page
+ * pieces. Calm on purpose: one highlighter mark per finding (a tint with a
+ * solid underline in the category colour), a plain label in the finding list,
+ * and one small dot. The kind is always named in words, so colour is never the
+ * only carrier.
+ */
+
+[data-cat="name"] { --c: var(--c-name); }
+[data-cat="email"] { --c: var(--c-email); }
+[data-cat="phone"] { --c: var(--c-phone); }
+[data-cat="cpr"] { --c: var(--c-cpr); }
+[data-cat="address"] { --c: var(--c-address); }
+[data-cat="bank"] { --c: var(--c-bank); }
+[data-cat="secret"] { --c: var(--c-secret); }
+[data-cat="org"] { --c: var(--c-org); }
+[data-cat="job"] { --c: var(--c-job); }
+[data-cat="ip"] { --c: var(--c-ip); }
+[data-cat="date"] { --c: var(--c-date); }
+[data-cat="misc"] { --c: var(--c-misc); }
+
+/* small coloured dot in front of a kind label */
+.pk-dotc {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--c);
+  flex: none;
+}
+
+/* icons (still used by the popup category chips and the options page, never in the overlay text) */
+.pk-ic {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+  color: var(--c, currentColor);
+  flex: none;
+}
+.pk-ic svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* the one mark: highlighter tint + solid underline */
+.pk-mk {
+  background: color-mix(in srgb, var(--c) 16%, transparent);
+  border-bottom: 2px solid var(--c);
+  border-radius: 2px;
+  padding: 0 1px;
+  cursor: pointer;
+  position: relative;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 0.15s;
+}
+.pk-mk:hover {
+  background: color-mix(in srgb, var(--c) 28%, transparent);
+}
+/* kept as it stands: no fill, a quiet dotted line */
+.pk-mk.pk-off {
+  background: none;
+  border-bottom: 2px dotted var(--ink-3);
+}
+
+/* the marker stroke: a black bar is drawn across the original before it becomes a placeholder */
+.pk-mk.pk-strike::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  top: 12%;
+  bottom: 12%;
+  background: var(--ink);
+  border-radius: 3px 5px 4px 3px;
+  transform-origin: left center;
+  transform: scaleX(0);
+  animation: pk-strike 0.95s cubic-bezier(0.3, 0.7, 0.2, 1) both;
+  pointer-events: none;
+}
+@keyframes pk-strike {
+  0% { transform: scaleX(0); opacity: 1; }
+  34% { transform: scaleX(1); opacity: 1; }
+  66% { transform: scaleX(1); opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0; }
+}
+
+/* the placeholder that replaces it */
+.pk-tag {
+  display: inline-block;
+  background: var(--teal-wash);
+  color: var(--teal-ink);
+  border-radius: 5px;
+  padding: 0 5px;
+  font: 600 0.84em/1.5 var(--f-ui);
+  white-space: nowrap;
+}
+.pk-tag.pk-stamp {
+  animation: pk-stamp 0.46s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+  animation-delay: var(--d, 0ms);
+  transform-origin: center;
+}
+@keyframes pk-stamp {
+  0% { opacity: 0; transform: scale(1.7) rotate(-7deg); }
+  55% { opacity: 1; transform: scale(0.94) rotate(1.5deg); }
+  100% { opacity: 1; transform: none; }
+}
+
+/* category chip: label with a dot (popup test results) */
+.pk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 12.5px/1.2 var(--f-ui);
+  color: var(--c);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-mk.pk-strike::after { display: none; }
+  .pk-tag.pk-stamp { animation: none; }
+}

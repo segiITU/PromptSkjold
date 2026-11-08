@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WASM_BINDGEN_VERSION: 0.2.118 # must match the exact pin in crate/Cargo.toml
+
+jobs:
+  validate:
+    name: Unit, Rust and static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and crate build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crate/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('crate/Cargo.lock') }}
+
+      - name: Cache wasm-bindgen CLI
+        id: wasm-bindgen-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-${{ runner.os }}-${{ env.WASM_BINDGEN_VERSION }}
+
+      - name: Install wasm-bindgen CLI
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "$WASM_BINDGEN_VERSION" --locked
+
+      - run: npm ci
+
+      # WASM build, jest, svelte-check, version alignment, permission audit,
+      # privacy boundary, cargo test and a model-free extension build.
+      - run: npm run validate:ci
+
+      - name: Upload model-free extension build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  e2e:
+    name: Playwright harness (real Chromium)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium for the pinned Playwright version
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser harness TypeScript check
+        run: npx tsc --noEmit --project tsconfig.live-e2e.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Mock chat pages only; no live provider sites are contacted.
+      - run: npm run test:e2e:harness
+
+      - name: Upload Playwright failure output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
