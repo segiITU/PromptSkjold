@@ -18,7 +18,6 @@ substituting personal data; the result may still allow re-identification.
 The controller responsible for the extension within the meaning of Art. 4(7) GDPR is:
 
 Sebastian Gilson (ermias.ai)
-Address: no street address is published here; the registered business address is in the public Danish CVR register under the CVR number below.
 Website: https://ermias.ai
 Contact: GitHub Issues at https://github.com/segiITU/PromptSkjold/issues (for anything that must
 not be public, see §15)

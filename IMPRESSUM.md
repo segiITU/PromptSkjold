@@ -6,7 +6,6 @@ Provider identification (Danish e-commerce act, and § 5 DDG for German visitors
 
 Sebastian Gilson (ermias.ai)
 
-Address: no street address is published here; the registered business address is in the public Danish CVR register under the CVR number below.
 Email: kontakt@ermias.ai
 CVR: 38843443
 
@@ -17,6 +16,13 @@ Source code and issues: https://github.com/segiITU/PromptSkjold
 
 No data protection officer has been appointed. Data-protection questions go to the publisher
 above. See `PRIVACY.md`.
+
+## Model
+
+The detection model is a fine-tuned version of `bardsai/eu-pii-multi-mini-preview` by BardsAI
+(<https://huggingface.co/bardsai/eu-pii-multi-mini-preview>), further trained on synthetic Danish
+and English data. The fine-tuned model can be downloaded at
+<https://huggingface.co/ermias-ai/da-pii-mini-preview-21m>.
 
 ## Notes
 
