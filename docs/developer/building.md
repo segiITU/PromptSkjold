@@ -24,6 +24,35 @@ npm install
 
 If Cargo rejects the lockfile version, update Rust with `rustup update`.
 
+## Rebuild From PowerShell On Windows
+
+For a frontend-only rebuild when `crate/pkg/` already matches the Rust source:
+
+```powershell
+npm run build:ext
+```
+
+For a full rebuild, use `npm run build`. Native Windows builds require the MSVC C++ build tools and `wasm-bindgen` on PATH. If those are unavailable, use the existing WSL Linux Rust toolchain instead:
+
+```powershell
+# One-time setup in the default WSL distribution (Rust/cargo must already be installed there).
+wsl --exec bash -lc 'rustup target add wasm32-unknown-unknown'
+wsl --cd $PWD.Path --exec bash -lc 'cargo install wasm-bindgen-cli --version 0.2.118 --locked --root ./tmp/wasm-tools'
+
+# Use WSL for Rust only; Node/npm and webpack still run on Windows.
+$env:PROMPTSKJOLD_USE_WSL = '1'
+npm run build
+npm run validate:release-strict
+npm run test:e2e:harness
+
+# After reviewing and committing the source changes (requires a clean Git tree):
+npm run package:release
+```
+
+WSL must be installed with a default distribution. Its Rust dependencies need network access on the first build. The workspace-local CLI is stored under ignored `tmp/wasm-tools/`. Keep the environment variable set in the PowerShell session for validation and packaging too. To return to native Rust, run `Remove-Item Env:PROMPTSKJOLD_USE_WSL`.
+
+The extension is rebuilt in `dist/`. The upload package and checksum are written to `release/prompt-skjold-<version>.zip` and `.sha256`. Generated artifacts stay out of Git. Reload the extension in `chrome://extensions` or `edge://extensions`, then refresh the chat tab.
+
 ## Model-Free Build
 
 A normal build can run without prepared transformer model assets:
@@ -56,19 +85,10 @@ When Rust code under `crate/src/` changes, rerun `npm run build:wasm`, reload th
 
 ## Full Model Build
 
-The public beta release package is expected to include prepared BardsAI EU multilingual NER assets. Prepare them before a strict release build:
+The public beta release package includes the Danish/English mini model. Fetch the pinned model weights and stage the committed tokenizer/config files:
 
 ```bash
-npm run prepare:model:bardsai -- \
-  --source-dir .model-sources/bardsai-eu-pii-anonimization-multilang \
-  --force
-```
-
-Then produce the runtime artifacts (fp16 external-data repackaging and the q4f16 quantization):
-
-```bash
-npm run convert:model:external-data -- --model bardsai-fp16
-npm run convert:model:q4f16:bardsai
+npm run fetch:model
 ```
 
 Then build with missing model assets treated as fatal:
@@ -77,20 +97,19 @@ Then build with missing model assets treated as fatal:
 NER_MODEL_ASSETS_REQUIRED=1 npm run build
 ```
 
+In PowerShell, set `$env:NER_MODEL_ASSETS_REQUIRED = '1'` before `npm run build`. `npm run validate:release-strict` and `npm run package:release` enforce model presence themselves.
+
 Expected prepared asset location:
 
 ```text
-generated/models/ner/bardsai-eu-pii-anonimization-multilang/
+generated/models/ner/bardsai-mini-da-en/
   config.json
   tokenizer.json
   tokenizer_config.json
-  onnx/model_q4f16.onnx
-  onnx/model_q4f16.onnx.data
-  onnx/model_fp16.onnx
-  onnx/model_fp16.onnx.data
+  onnx/model_quantized.onnx
 ```
 
-Webpack copies those files into `dist/models/ner/bardsai-eu-pii-anonimization-multilang/`, excludes the inactive q8 `model_quantized.onnx` artifact if it exists in `generated/`, and copies the required ONNX Runtime Web files into `dist/vendor/onnxruntime-web/`.
+Webpack copies those files into `dist/models/ner/bardsai-mini-da-en/` and copies the CPU/WASM ONNX Runtime Web files into `dist/vendor/onnxruntime-web/`.
 
 See `docs/developer/model-assets.md` for source download, conversion, and licensing notes.
 

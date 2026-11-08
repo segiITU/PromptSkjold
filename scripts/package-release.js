@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
+const { runNpm } = require('./run-npm');
 
 const {
   missingOnnxRuntimeAssets,
@@ -51,28 +52,9 @@ function toPosixPath(value) {
   return value.split(path.sep).join('/');
 }
 
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
 function readPackageVersion(rootDir) {
   const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
   return packageJson.version;
-}
-
-function runStep(label, command, args, options = {}) {
-  console.log(`\n> ${label}`);
-  const result = childProcess.spawnSync(command, args, {
-    cwd: options.cwd || process.cwd(),
-    env: { ...process.env, ...(options.env || {}) },
-    stdio: 'inherit',
-    shell: false,
-  });
-
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`${label} failed with exit code ${result.status}.`);
-  }
 }
 
 function assertCleanGitWorktree(rootDir) {
@@ -208,8 +190,8 @@ function createReleasePackage(options = {}) {
   }
 
   if (!skipBuild) {
-    runStep('WASM release build', npmCommand(), ['run', 'build:wasm'], { cwd: rootDir });
-    runStep('Extension build with required BardsAI assets', npmCommand(), ['run', 'build:ext'], {
+    runNpm('WASM release build', ['run', 'build:wasm'], { cwd: rootDir });
+    runNpm('Extension build with required BardsAI assets', ['run', 'build:ext'], {
       cwd: rootDir,
       env: { NER_MODEL_ASSETS_REQUIRED: '1' },
     });

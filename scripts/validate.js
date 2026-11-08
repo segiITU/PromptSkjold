@@ -1,36 +1,10 @@
 #!/usr/bin/env node
 
-const childProcess = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { runNpm } = require('./run-npm');
 
 const DEFAULT_VERSION = null;
-
-function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
-function runStep(label, command, args, options = {}) {
-  console.log(`\n> ${label}`);
-  const result = childProcess.spawnSync(command, args, {
-    cwd: options.cwd || process.cwd(),
-    env: { ...process.env, ...(options.env || {}) },
-    stdio: 'inherit',
-    shell: false,
-  });
-
-  if (result.error) {
-    throw result.error;
-  }
-
-  if (result.status !== 0) {
-    throw new Error(`${label} failed with exit code ${result.status}.`);
-  }
-}
-
-function runNpm(label, args, options) {
-  runStep(label, npmCommand(), args, options);
-}
 
 function readPackageVersion(rootDir = process.cwd()) {
   const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));

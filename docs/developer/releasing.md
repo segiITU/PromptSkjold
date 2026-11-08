@@ -75,7 +75,9 @@ Release-strict checks with prepared BardsAI assets:
 npm run validate:release-strict
 ```
 
-This path runs the same release metadata and privacy-boundary checks, builds the WASM package, and then builds the extension with `NER_MODEL_ASSETS_REQUIRED=1`. It fails if the prepared BardsAI files are missing from `generated/models/ner/bardsai-eu-pii-anonimization-multilang/`.
+This path runs the same release metadata and privacy-boundary checks, builds the WASM package, and then builds the extension with `NER_MODEL_ASSETS_REQUIRED=1`. It fails if the prepared mini model files are missing from `generated/models/ner/bardsai-mini-da-en/`. Fetch them with `npm run fetch:model` first.
+
+Windows validation and packaging invoke npm through Node, without spawning `npm.cmd`. If using the Linux Rust toolchain, set `$env:PROMPTSKJOLD_USE_WSL = '1'` in PowerShell before these commands; see [the Windows rebuild workflow](building.md#rebuild-from-powershell-on-windows).
 
 Run the manual smoke checklist in `docs/release/smoke-test-checklist.md` against:
 

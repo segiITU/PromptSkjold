@@ -2,6 +2,12 @@
 
 Upload-ready copy and permission justifications for PromptSkjold `0.5.0`. The upload itself is manual: this document only prepares the text the operator pastes into the Chrome Developer Dashboard and the Edge Partner Center.
 
+## Publisher Registration Status
+
+- 2026-11-08: Sebastian submitted an application to become a Chrome Web Store developer.
+- CWS developer application reference: `884d673e-fe14-4ca9-82ea-32e44db28672`.
+- Registration approval and extension submission/approval are not yet confirmed. This reference is for publisher registration, not an extension listing ID.
+
 **Before you paste:** the claims below were written from the code and `CHANGELOG.md`. Submit interception, file attach and Copilot on the live sites were still being checked by hand when this was written. Remove or soften any sentence your live test does not back up.
 
 **URLs to create on ermias.ai** (proposed paths; change them here and in `src/shared/project-links.ts` if you pick others): `/promptskjold`, `/promptskjold/privacy`, `/promptskjold/terms`, `/promptskjold/impressum`. Ready-made HTML for the last three is in `release/site/` (see the end of this file).

@@ -14,7 +14,7 @@
   },
   "author": "Sebastian Gilson (https://ermias.ai)",
   "scripts": {
-    "build:wasm": "cd crate && cargo build --release --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir pkg --out-name privacy_guardrail_wasm target/wasm32-unknown-unknown/release/privacy_guardrail_wasm.wasm",
+    "build:wasm": "node scripts/rust.js build",
     "fetch:model": "node scripts/fetch-model.js",
     "build:tokens": "node scripts/build-tokens.js && node scripts/build-page-assets.js",
     "build:ext": "node scripts/build-tokens.js && node scripts/build-page-assets.js && webpack --mode production",
@@ -40,7 +40,7 @@
     "test:e2e:live": "node scripts/run-live-e2e.js",
     "test:e2e:harness": "playwright test --config e2e/live/playwright.harness.config.ts",
     "test:ner:model": "jest --config jest.local-model.config.js",
-    "test:rust": "cd crate && cargo test",
+    "test:rust": "node scripts/rust.js test",
     "check:svelte": "svelte-check --tsconfig ./tsconfig.svelte.json",
     "check:permissions": "node scripts/check-extension-permissions.js",
     "check:privacy-boundary": "node scripts/check-privacy-boundary.js",
